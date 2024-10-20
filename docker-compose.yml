@@ -1,0 +1,8 @@
+services:
+  reminder:
+    build: .
+    volumes:
+      - ./reminders.db:/app/reminders.db
+    environment:
+      - DISCORD_TOKEN=${DISCORD_TOKEN}
+    restart: unless-stopped
