@@ -35,6 +35,10 @@ var (
 	cronEntries   sync.Map
 )
 
+var (
+	parser = cron.NewParser(cron.SecondOptional | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
+)
+
 func main() {
 	err := godotenv.Load()
 	if err != nil {
@@ -160,7 +164,6 @@ func handleRecurringCommand(s *discordgo.Session, m *discordgo.MessageCreate, pa
 	cronExpr := args[0]
 	message := strings.Join(args[1:], " ")
 
-	parser := cron.NewParser(cron.SecondOptional | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
 	_, err := parser.Parse(cronExpr)
 	if err != nil {
 		s.ChannelMessageSend(m.ChannelID, "Invalid cron expression. Please check your syntax.")
@@ -415,7 +418,7 @@ func listReminders(s *discordgo.Session, m *discordgo.MessageCreate) {
 		}
 
 		if cronExpr.Valid && cronExpr.String != "" {
-			schedule, _ := cron.ParseStandard(cronExpr.String)
+			schedule, _ := parser.Parse(cronExpr.String)
 			now := time.Now()
 			next := schedule.Next(now)
 			reminders.WriteString(fmt.Sprintf("%d: %s (recurring: %s, next: <t:%d:F>, <t:%d:R>)\n", id, message, cronExpr.String, next.Unix(), next.Unix()))
