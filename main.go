@@ -35,6 +35,18 @@ var (
 	cronEntries   sync.Map
 )
 
+var (
+	parser = cron.NewParser(cron.SecondOptional | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
+)
+
+func init() {
+	loc, err := time.LoadLocation("Asia/Jakarta")
+	if err != nil {
+		log.Fatal(err)
+	}
+	time.Local = loc
+}
+
 func main() {
 	err := godotenv.Load()
 	if err != nil {
@@ -160,7 +172,6 @@ func handleRecurringCommand(s *discordgo.Session, m *discordgo.MessageCreate, pa
 	cronExpr := args[0]
 	message := strings.Join(args[1:], " ")
 
-	parser := cron.NewParser(cron.SecondOptional | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
 	_, err := parser.Parse(cronExpr)
 	if err != nil {
 		s.ChannelMessageSend(m.ChannelID, "Invalid cron expression. Please check your syntax.")
@@ -262,7 +273,6 @@ func scheduleReminder(s *discordgo.Session, id int, r Reminder) {
 }
 
 func scheduleRecurringReminder(s *discordgo.Session, id int, r Reminder) {
-	parser := cron.NewParser(cron.SecondOptional | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
 	schedule, err := parser.Parse(r.CronExpr)
 	if err != nil {
 		log.Printf("Error parsing cron expression: %v", err)
@@ -415,14 +425,17 @@ func listReminders(s *discordgo.Session, m *discordgo.MessageCreate) {
 		}
 
 		if cronExpr.Valid && cronExpr.String != "" {
-			reminders.WriteString(fmt.Sprintf("%d: %s (recurring: %s)\n", id, message, cronExpr.String))
+			schedule, _ := parser.Parse(cronExpr.String)
+			now := time.Now()
+			next := schedule.Next(now)
+			reminders.WriteString(fmt.Sprintf("%d: %s (recurring: %s, next: <t:%d:F>, <t:%d:R>)\n", id, message, cronExpr.String, next.Unix(), next.Unix()))
 		} else if dueTimeNullStr.Valid {
 			dueTime, err := time.Parse(time.RFC3339, dueTimeNullStr.String)
 			if err != nil {
 				log.Printf("Error parsing due time: %v", err)
 				continue
 			}
-			reminders.WriteString(fmt.Sprintf("%d: %s (due %s)\n", id, message, dueTime.Format(time.RFC1123)))
+			reminders.WriteString(fmt.Sprintf("%d: %s (due <t:%d:F>, <t:%d:R>)\n", id, message, dueTime.Unix(), dueTime.Unix()))
 		}
 	}
 
