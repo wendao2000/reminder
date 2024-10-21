@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,7 +26,7 @@ type Reminder struct {
 	UserID    string
 	Message   string
 	DueTime   time.Time
-	CronExpr  string
+	CronExpr  sql.NullString
 }
 
 var (
@@ -128,18 +129,48 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 
 func handleRemindCommand(s *discordgo.Session, m *discordgo.MessageCreate, parts []string) {
 	if len(parts) < 3 {
-		s.ChannelMessageSend(m.ChannelID, "Usage: !remind <duration> <message>")
+		s.ChannelMessageSend(m.ChannelID, "Usage: !remind <duration/time> <message> or !remind `<time>` <message>")
 		return
 	}
 
-	duration, err := parseDuration(parts[1])
-	if err != nil {
-		s.ChannelMessageSend(m.ChannelID, "Invalid duration format. Use formats like 5m, 2h, 1d, etc.")
-		return
+	var timeStr string
+	var message string
+
+	// Check if the time is enclosed in backticks
+	if strings.HasPrefix(parts[1], "`") {
+		args := parseBacktickArgs(strings.Join(parts[1:], " "))
+		if len(args) < 2 {
+			s.ChannelMessageSend(m.ChannelID, "Invalid command format. Please provide both time and message.")
+			return
+		}
+		timeStr = args[0]
+		message = strings.Join(args[1:], " ")
+	} else {
+		timeStr = parts[1]
+		message = strings.Join(parts[2:], " ")
 	}
 
-	message := strings.Join(parts[2:], " ")
-	dueTime := time.Now().Add(duration)
+	now := time.Now()
+	var dueTime time.Time
+
+	// First, try to parse as duration
+	duration, err := parseDuration(timeStr)
+	if err == nil {
+		dueTime = now.Add(duration)
+	} else {
+		// If not a duration, try to parse as a specific time
+		dueTime, err = parseFlexibleTime(timeStr)
+		if err != nil {
+			s.ChannelMessageSend(m.ChannelID, "Invalid time format. Use a duration (e.g., 5m, 2h, 1d) or a specific time (e.g., 2023-05-20T15:04:05).")
+			return
+		}
+	}
+
+	// Check if the due time is in the future
+	if dueTime.Before(now) {
+		s.ChannelMessageSend(m.ChannelID, "Error: Reminder time must be in the future.")
+		return
+	}
 
 	reminder := Reminder{
 		ChannelID: m.ChannelID,
@@ -156,7 +187,70 @@ func handleRemindCommand(s *discordgo.Session, m *discordgo.MessageCreate, parts
 
 	scheduleReminder(s, id, reminder)
 
-	s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("One-time reminder set for %s from now with ID: %d", duration, id))
+	s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Reminder set for <t:%d:F>, <t:%d:R> (ID: %d)", dueTime.Unix(), dueTime.Unix(), id))
+}
+
+func parseFlexibleTime(timeStr string) (time.Time, error) {
+	// First, try to parse as AM/PM format
+	if t, err := parseAMPM(timeStr); err == nil {
+		return t, nil
+	}
+
+	// If AM/PM parsing fails, try other formats
+	formats := []string{
+		time.RFC3339,
+		"2006-01-02T15:04:05",
+		"2006-01-02 15:04:05",
+		"2006-01-02T15:04",
+		"2006-01-02 15:04",
+		"2006-01-02",
+		"15:04:05",
+		"15:04",
+	}
+
+	for _, format := range formats {
+		if t, err := time.ParseInLocation(format, timeStr, time.Local); err == nil {
+			// If only time is provided (not date), set it to today or tomorrow
+			if len(timeStr) <= 8 { // Assuming time formats like "15:04:05" or "15:04"
+				now := time.Now()
+				t = time.Date(now.Year(), now.Month(), now.Day(), t.Hour(), t.Minute(), t.Second(), 0, time.Local)
+				if t.Before(now) {
+					t = t.AddDate(0, 0, 1) // Set to tomorrow if the time today has already passed
+				}
+			}
+			return t, nil
+		}
+	}
+
+	return time.Time{}, fmt.Errorf("unable to parse time: %s", timeStr)
+}
+
+func parseAMPM(timeStr string) (time.Time, error) {
+	re := regexp.MustCompile(`^(\d{1,2})(?::(\d{2}))?(?::(\d{2}))?\s*(am|pm)$`)
+	matches := re.FindStringSubmatch(strings.ToLower(timeStr))
+
+	if matches == nil {
+		return time.Time{}, fmt.Errorf("invalid AM/PM time format")
+	}
+
+	hour, _ := strconv.Atoi(matches[1])
+	minute, _ := strconv.Atoi(matches[2])
+	second, _ := strconv.Atoi(matches[3])
+
+	if matches[4] == "pm" && hour < 12 {
+		hour += 12
+	} else if matches[4] == "am" && hour == 12 {
+		hour = 0
+	}
+
+	now := time.Now()
+	t := time.Date(now.Year(), now.Month(), now.Day(), hour, minute, second, 0, time.Local)
+
+	if t.Before(now) {
+		t = t.AddDate(0, 0, 1) // Set to tomorrow if the time today has already passed
+	}
+
+	return t, nil
 }
 
 func handleRecurringCommand(s *discordgo.Session, m *discordgo.MessageCreate, parts []string) {
@@ -182,7 +276,10 @@ func handleRecurringCommand(s *discordgo.Session, m *discordgo.MessageCreate, pa
 		ChannelID: m.ChannelID,
 		UserID:    m.Author.ID,
 		Message:   message,
-		CronExpr:  cronExpr,
+		CronExpr: sql.NullString{
+			Valid:  true,
+			String: cronExpr,
+		},
 	}
 
 	id, err := saveReminder(reminder)
@@ -273,7 +370,7 @@ func scheduleReminder(s *discordgo.Session, id int, r Reminder) {
 }
 
 func scheduleRecurringReminder(s *discordgo.Session, id int, r Reminder) {
-	schedule, err := parser.Parse(r.CronExpr)
+	schedule, err := parser.Parse(r.CronExpr.String)
 	if err != nil {
 		log.Printf("Error parsing cron expression: %v", err)
 		return
@@ -303,7 +400,7 @@ func scheduleAllReminders(s *discordgo.Session) {
 			continue
 		}
 
-		if r.CronExpr != "" {
+		if r.CronExpr.Valid && r.CronExpr.String != "" {
 			scheduleRecurringReminder(s, r.ID, r)
 		} else if dueTimeStr.Valid {
 			r.DueTime, err = time.Parse(time.RFC3339, dueTimeStr.String)
@@ -324,7 +421,7 @@ func saveReminder(r Reminder) (int, error) {
 	var result sql.Result
 	var err error
 
-	if r.CronExpr != "" {
+	if r.CronExpr.Valid && r.CronExpr.String != "" {
 		result, err = db.Exec("INSERT INTO reminders (channel_id, user_id, message, cron_expr) VALUES (?, ?, ?, ?)",
 			r.ChannelID, r.UserID, r.Message, r.CronExpr)
 	} else {
