@@ -418,7 +418,7 @@ func listReminders(s *discordgo.Session, m *discordgo.MessageCreate) {
 			schedule, _ := cron.ParseStandard(cronExpr.String)
 			now := time.Now()
 			next := schedule.Next(now)
-			reminders.WriteString(fmt.Sprintf("%d: %s (recurring: %s, next: %s)\n", id, message, cronExpr.String, next.Format(time.RFC1123)))
+			reminders.WriteString(fmt.Sprintf("%d: %s (recurring: %s, next: <t:%d:F>)\n", id, message, cronExpr.String, next.Unix()))
 		} else if dueTimeNullStr.Valid {
 			dueTime, err := time.Parse(time.RFC3339, dueTimeNullStr.String)
 			if err != nil {
