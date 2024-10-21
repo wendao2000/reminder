@@ -273,7 +273,6 @@ func scheduleReminder(s *discordgo.Session, id int, r Reminder) {
 }
 
 func scheduleRecurringReminder(s *discordgo.Session, id int, r Reminder) {
-	parser := cron.NewParser(cron.SecondOptional | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
 	schedule, err := parser.Parse(r.CronExpr)
 	if err != nil {
 		log.Printf("Error parsing cron expression: %v", err)
