@@ -39,6 +39,14 @@ var (
 	parser = cron.NewParser(cron.SecondOptional | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
 )
 
+func init() {
+	loc, err := time.LoadLocation("Asia/Jakarta")
+	if err != nil {
+		log.Fatal(err)
+	}
+	time.Local = loc
+}
+
 func main() {
 	err := godotenv.Load()
 	if err != nil {
