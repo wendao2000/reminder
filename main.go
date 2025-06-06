@@ -70,7 +70,7 @@ func main() {
 		log.Fatal("Error creating Discord session:", err)
 	}
 
-	db, err = sql.Open("sqlite3", "./reminders.db")
+	db, err = sql.Open("sqlite3", "/app/data/reminders.db")
 	if err != nil {
 		log.Fatal("Error opening database:", err)
 	}
