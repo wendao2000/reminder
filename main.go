@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -27,6 +29,30 @@ type Reminder struct {
 	Message   string
 	DueTime   time.Time
 	CronExpr  sql.NullString
+}
+
+func (r Reminder) MarshalJSON() ([]byte, error) {
+	type Alias struct {
+		ID        int    `json:"id"`
+		ChannelID string `json:"channel_id"`
+		UserID    string `json:"user_id"`
+		Message   string `json:"message"`
+		DueTime   string `json:"due_time,omitempty"`
+		CronExpr  string `json:"cron_expr,omitempty"`
+	}
+	a := Alias{
+		ID:        r.ID,
+		ChannelID: r.ChannelID,
+		UserID:    r.UserID,
+		Message:   r.Message,
+	}
+	if !r.DueTime.IsZero() {
+		a.DueTime = r.DueTime.Format(time.RFC3339)
+	}
+	if r.CronExpr.Valid {
+		a.CronExpr = r.CronExpr.String
+	}
+	return json.Marshal(a)
 }
 
 var (
@@ -124,6 +150,8 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 		listReminders(s, m)
 	case "!delete":
 		handleDeleteCommand(s, m, parts)
+	case "!export":
+		handleExportCommand(s, m)
 	}
 }
 
@@ -541,4 +569,57 @@ func listReminders(s *discordgo.Session, m *discordgo.MessageCreate) {
 	} else {
 		s.ChannelMessageSend(m.ChannelID, reminders.String())
 	}
+}
+
+func handleExportCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
+	data, err := exportActiveRemindersForUser(m.Author.ID)
+	if err != nil {
+		s.ChannelMessageSend(m.ChannelID, "Error exporting reminders: "+err.Error())
+		return
+	}
+	dm, err := s.UserChannelCreate(m.Author.ID)
+	if err != nil {
+		s.ChannelMessageSend(m.ChannelID, "Error creating DM channel: "+err.Error())
+		return
+	}
+
+	reader := bytes.NewReader(data)
+	_, err = s.ChannelFileSend(dm.ID, "reminders.json", reader)
+	if err != nil {
+		s.ChannelMessageSend(m.ChannelID, "Error sending file via DM: "+err.Error())
+		return
+	}
+
+	s.ChannelMessageSend(m.ChannelID, "I've sent your reminders via DM.")
+}
+
+func exportActiveRemindersForUser(userID string) ([]byte, error) {
+	rows, err := db.Query("SELECT id, channel_id, user_id, message, due_time, cron_expr FROM reminders WHERE user_id = ?", userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	now := time.Now()
+	var list []Reminder
+
+	for rows.Next() {
+		var r Reminder
+		var dueTimeStr sql.NullString
+		if err := rows.Scan(&r.ID, &r.ChannelID, &r.UserID, &r.Message, &dueTimeStr, &r.CronExpr); err != nil {
+			return nil, err
+		}
+
+		if r.CronExpr.Valid && r.CronExpr.String != "" {
+			list = append(list, r)
+		} else if dueTimeStr.Valid {
+			t, err := time.Parse(time.RFC3339, dueTimeStr.String)
+			if err == nil && t.After(now) {
+				r.DueTime = t
+				list = append(list, r)
+			}
+		}
+	}
+
+	return json.MarshalIndent(list, "", "  ")
 }
