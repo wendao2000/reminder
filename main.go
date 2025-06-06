@@ -888,9 +888,9 @@ func handleSnoozeInteraction(s *discordgo.Session, i *discordgo.InteractionCreat
 	dur, _ := time.ParseDuration(value)
 	r.DueTime = time.Now().Add(dur)
 
-	id, err := saveReminder(r)
+	newid, err := saveReminder(r)
 	if err == nil {
-		scheduleReminder(s, id, r)
+		scheduleReminder(s, newid, r)
 	}
 
 	snoozedEntries.Delete(id)
