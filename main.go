@@ -708,6 +708,10 @@ func exportActiveRemindersForUser(userID string) ([]byte, error) {
 	var list []Reminder
 
 	for rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+
 		var r Reminder
 		var dueTimeStr sql.NullString
 		if err := rows.Scan(&r.ID, &r.ChannelID, &r.UserID, &r.Message, &dueTimeStr, &r.CronExpr); err != nil {
