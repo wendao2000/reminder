@@ -34,6 +34,12 @@ var (
 	reminders     map[int]*time.Timer
 	cronScheduler *cron.Cron
 	cronEntries   sync.Map
+	pausedEntries sync.Map
+)
+
+const (
+	customIDStopRecurring  = "stopRecurring"
+	customIDPauseRecurring = "pauseRecurring"
 )
 
 var (
@@ -87,6 +93,7 @@ func main() {
 	cronEntries = sync.Map{}
 
 	dg.AddHandler(messageCreate)
+	dg.AddHandler(interactionCreate)
 
 	err = dg.Open()
 	if err != nil {
@@ -124,6 +131,8 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 		listReminders(s, m)
 	case "!delete":
 		handleDeleteCommand(s, m, parts)
+	case "!resume":
+		handleResumeCommand(s, m, parts)
 	}
 }
 
@@ -370,6 +379,11 @@ func scheduleReminder(s *discordgo.Session, id int, r Reminder) {
 }
 
 func scheduleRecurringReminder(s *discordgo.Session, id int, r Reminder) {
+	if val, ok := pausedEntries.Load(id); ok {
+		if paused, ok := val.(bool); ok && paused {
+			return
+		}
+	}
 	schedule, err := parser.Parse(r.CronExpr.String)
 	if err != nil {
 		log.Printf("Error parsing cron expression: %v", err)
@@ -377,7 +391,23 @@ func scheduleRecurringReminder(s *discordgo.Session, id int, r Reminder) {
 	}
 
 	entryID := cronScheduler.Schedule(schedule, cron.FuncJob(func() {
-		s.ChannelMessageSend(r.ChannelID, fmt.Sprintf("<@%s> Recurring Reminder (ID: %d): %s", r.UserID, id, r.Message))
+		s.ChannelMessageSendComplex(r.ChannelID, &discordgo.MessageSend{
+			Content: fmt.Sprintf("<@%s> Recurring Reminder (ID: %d): %s", r.UserID, id, r.Message),
+			Components: []discordgo.MessageComponent{
+				discordgo.ActionsRow{Components: []discordgo.MessageComponent{
+					discordgo.Button{
+						Label:    "Stop",
+						Style:    discordgo.DangerButton,
+						CustomID: fmt.Sprintf("%s:%d", customIDStopRecurring, id),
+					},
+					discordgo.Button{
+						Label:    "Pause",
+						Style:    discordgo.PrimaryButton,
+						CustomID: fmt.Sprintf("%s:%d", customIDPauseRecurring, id),
+					},
+				}},
+			},
+		})
 	}))
 
 	cronEntries.Store(id, entryID)
@@ -441,6 +471,31 @@ func saveReminder(r Reminder) (int, error) {
 	return int(id), nil
 }
 
+func pauseRecurringReminder(id int) {
+	pausedEntries.Store(id, true)
+}
+
+func resumeRecurringReminder(id int) {
+	pausedEntries.Delete(id)
+}
+
+func getReminderUserID(id int) (string, error) {
+	var userID string
+	err := db.QueryRow("SELECT user_id FROM reminders WHERE id = ?", id).Scan(&userID)
+	if err != nil {
+		return "", err
+	}
+	return userID, nil
+}
+
+func isReminderOwner(id int, userID string) (bool, error) {
+	owner, err := getReminderUserID(id)
+	if err != nil {
+		return false, err
+	}
+	return owner == userID, nil
+}
+
 func deleteReminder(id int) error {
 	_, err := db.Exec("DELETE FROM reminders WHERE id = ?", id)
 	if err != nil {
@@ -475,8 +530,7 @@ func handleDeleteCommand(s *discordgo.Session, m *discordgo.MessageCreate, parts
 		return
 	}
 
-	var userID string
-	err = db.QueryRow("SELECT user_id FROM reminders WHERE id = ?", id).Scan(&userID)
+	ok, err := isReminderOwner(id, m.Author.ID)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			s.ChannelMessageSend(m.ChannelID, "Reminder not found")
@@ -486,7 +540,7 @@ func handleDeleteCommand(s *discordgo.Session, m *discordgo.MessageCreate, parts
 		return
 	}
 
-	if userID != m.Author.ID {
+	if !ok {
 		s.ChannelMessageSend(m.ChannelID, "You can only delete your own reminders")
 		return
 	}
@@ -498,6 +552,42 @@ func handleDeleteCommand(s *discordgo.Session, m *discordgo.MessageCreate, parts
 	}
 
 	s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Reminder %d deleted", id))
+}
+
+func handleResumeCommand(s *discordgo.Session, m *discordgo.MessageCreate, parts []string) {
+	if len(parts) != 2 {
+		s.ChannelMessageSend(m.ChannelID, "Usage: !resume <id>")
+		return
+	}
+
+	id, err := strconv.Atoi(parts[1])
+	if err != nil {
+		s.ChannelMessageSend(m.ChannelID, "Invalid reminder ID")
+		return
+	}
+
+	ok, err := isReminderOwner(id, m.Author.ID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			s.ChannelMessageSend(m.ChannelID, "Reminder not found")
+		} else {
+			s.ChannelMessageSend(m.ChannelID, "Error checking reminder: "+err.Error())
+		}
+		return
+	}
+
+	if !ok {
+		s.ChannelMessageSend(m.ChannelID, "You can only resume your own reminders")
+		return
+	}
+
+	if paused, ok := pausedEntries.Load(id); !ok || !paused.(bool) {
+		s.ChannelMessageSend(m.ChannelID, "Reminder is not paused")
+		return
+	}
+
+	resumeRecurringReminder(id)
+	s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Recurring reminder %d resumed", id))
 }
 
 func listReminders(s *discordgo.Session, m *discordgo.MessageCreate) {
@@ -521,11 +611,22 @@ func listReminders(s *discordgo.Session, m *discordgo.MessageCreate) {
 			continue
 		}
 
+		paused := false
+		if val, ok := pausedEntries.Load(id); ok {
+			if b, ok2 := val.(bool); ok2 {
+				paused = b
+			}
+		}
+
 		if cronExpr.Valid && cronExpr.String != "" {
-			schedule, _ := parser.Parse(cronExpr.String)
-			now := time.Now()
-			next := schedule.Next(now)
-			reminders.WriteString(fmt.Sprintf("%d: %s (recurring: %s, next: <t:%d:F>, <t:%d:R>)\n", id, message, cronExpr.String, next.Unix(), next.Unix()))
+			if paused {
+				reminders.WriteString(fmt.Sprintf("%d: %s (recurring: %s, paused)\n", id, message, cronExpr.String))
+			} else {
+				schedule, _ := parser.Parse(cronExpr.String)
+				now := time.Now()
+				next := schedule.Next(now)
+				reminders.WriteString(fmt.Sprintf("%d: %s (recurring: %s, next: <t:%d:F>, <t:%d:R>)\n", id, message, cronExpr.String, next.Unix(), next.Unix()))
+			}
 		} else if dueTimeNullStr.Valid {
 			dueTime, err := time.Parse(time.RFC3339, dueTimeNullStr.String)
 			if err != nil {
@@ -540,5 +641,105 @@ func listReminders(s *discordgo.Session, m *discordgo.MessageCreate) {
 		s.ChannelMessageSend(m.ChannelID, "You have no reminders set")
 	} else {
 		s.ChannelMessageSend(m.ChannelID, reminders.String())
+	}
+}
+
+func handleStopRecurringInteraction(s *discordgo.Session, i *discordgo.InteractionCreate, id int) {
+	ok, err := isReminderOwner(id, i.Member.User.ID)
+	if err != nil {
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "Failed to stop reminder",
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+		return
+	}
+	if !ok {
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "You can only stop your own recurring reminders",
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+		return
+	}
+
+	if err := deleteReminder(id); err != nil {
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "Error deleting reminder",
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+		return
+	}
+
+	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Content: fmt.Sprintf("Recurring reminder %d stopped", id),
+			Flags:   discordgo.MessageFlagsEphemeral,
+		},
+	})
+}
+
+func handlePauseRecurringInteraction(s *discordgo.Session, i *discordgo.InteractionCreate, id int) {
+	ok, err := isReminderOwner(id, i.Member.User.ID)
+	if err != nil {
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "Failed to pause reminder",
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+		return
+	}
+	if !ok {
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "You can only pause your own recurring reminders",
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+		return
+	}
+
+	pauseRecurringReminder(id)
+
+	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Content: fmt.Sprintf("Recurring reminder %d paused", id),
+			Flags:   discordgo.MessageFlagsEphemeral,
+		},
+	})
+}
+
+func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	if i.Type != discordgo.InteractionMessageComponent {
+		return
+	}
+
+	data := i.MessageComponentData()
+	parts := strings.Split(data.CustomID, ":")
+	if len(parts) != 2 {
+		return
+	}
+	id, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return
+	}
+
+	switch parts[0] {
+	case customIDStopRecurring:
+		handleStopRecurringInteraction(s, i, id)
+	case customIDPauseRecurring:
+		handlePauseRecurringInteraction(s, i, id)
 	}
 }
