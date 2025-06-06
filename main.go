@@ -515,6 +515,8 @@ func deleteReminder(id int) error {
 		cronEntries.Delete(id)
 	}
 
+	pausedEntries.Delete(id)
+
 	return nil
 }
 
