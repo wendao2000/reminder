@@ -57,16 +57,18 @@ func (r Reminder) MarshalJSON() ([]byte, error) {
 }
 
 var (
-	db            *sql.DB
-	reminders     map[int]*time.Timer
-	cronScheduler *cron.Cron
-	cronEntries   sync.Map
-	pausedEntries sync.Map
+	db             *sql.DB
+	reminders      map[int]*time.Timer
+	cronScheduler  *cron.Cron
+	cronEntries    sync.Map
+	pausedEntries  sync.Map
+	snoozedEntries sync.Map
 )
 
 const (
 	customIDStopRecurring  = "stopRecurring"
 	customIDPauseRecurring = "pauseRecurring"
+	customIDSnoozeReminder = "snoozeReminder"
 )
 
 var (
@@ -401,7 +403,30 @@ func parseBacktickArgs(s string) []string {
 func scheduleReminder(s *discordgo.Session, id int, r Reminder) {
 	duration := time.Until(r.DueTime)
 	timer := time.AfterFunc(duration, func() {
-		s.ChannelMessageSend(r.ChannelID, fmt.Sprintf("<@%s> Reminder: %s", r.UserID, r.Message))
+		msg := &discordgo.MessageSend{
+			Content: fmt.Sprintf("<@%s> Reminder: %s", r.UserID, r.Message),
+			Components: []discordgo.MessageComponent{
+				discordgo.ActionsRow{
+					Components: []discordgo.MessageComponent{
+						discordgo.SelectMenu{
+							CustomID:    fmt.Sprintf("%s:%d", customIDSnoozeReminder, id),
+							Placeholder: "Snooze for...",
+							Options: []discordgo.SelectMenuOption{
+								{Label: "5 minutes", Value: "5m"},
+								{Label: "10 minutes", Value: "10m"},
+								{Label: "15 minutes", Value: "15m"},
+								{Label: "30 minutes", Value: "30m"},
+								{Label: "60 minutes", Value: "60m"},
+							},
+						},
+					},
+				},
+			},
+		}
+		s.ChannelMessageSendComplex(r.ChannelID, msg)
+
+		snoozedEntries.Store(id, r)
+		time.AfterFunc(5*time.Minute, func() { snoozedEntries.Delete(id) })
 		deleteReminder(id)
 	})
 	reminders[id] = timer
@@ -815,6 +840,7 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	}
 
 	data := i.MessageComponentData()
+
 	parts := strings.Split(data.CustomID, ":")
 	if len(parts) != 2 {
 		return
@@ -829,5 +855,61 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		handleStopRecurringInteraction(s, i, id)
 	case customIDPauseRecurring:
 		handlePauseRecurringInteraction(s, i, id)
+	case customIDSnoozeReminder:
+		handleSnoozeInteraction(s, i, id, data.Values[0])
+	}
+}
+
+func handleSnoozeInteraction(s *discordgo.Session, i *discordgo.InteractionCreate, id int, value string) {
+	if i.Message != nil && time.Since(i.Message.Timestamp) > 5*time.Minute {
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "Snooze expired. Please create a new reminder",
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+		return
+	}
+
+	rInterface, ok := snoozedEntries.Load(id)
+	if !ok {
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "Snooze expired. Please create a new reminder",
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+		return
+	}
+
+	r := rInterface.(Reminder)
+	dur, _ := time.ParseDuration(value)
+	r.DueTime = time.Now().Add(dur)
+
+	newid, err := saveReminder(r)
+	if err == nil {
+		scheduleReminder(s, newid, r)
+	}
+
+	snoozedEntries.Delete(id)
+
+	if err != nil {
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "Error scheduling snoozed reminder: " + err.Error(),
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+	} else {
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: fmt.Sprintf("Snoozed for %s", value),
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
 	}
 }
