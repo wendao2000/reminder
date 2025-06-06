@@ -379,11 +379,6 @@ func scheduleReminder(s *discordgo.Session, id int, r Reminder) {
 }
 
 func scheduleRecurringReminder(s *discordgo.Session, id int, r Reminder) {
-	if val, ok := pausedEntries.Load(id); ok {
-		if paused, ok := val.(bool); ok && paused {
-			return
-		}
-	}
 	schedule, err := parser.Parse(r.CronExpr.String)
 	if err != nil {
 		log.Printf("Error parsing cron expression: %v", err)
@@ -391,6 +386,11 @@ func scheduleRecurringReminder(s *discordgo.Session, id int, r Reminder) {
 	}
 
 	entryID := cronScheduler.Schedule(schedule, cron.FuncJob(func() {
+		if val, ok := pausedEntries.Load(id); ok {
+			if paused, ok := val.(bool); ok && paused {
+				return
+			}
+		}
 		s.ChannelMessageSendComplex(r.ChannelID, &discordgo.MessageSend{
 			Content: fmt.Sprintf("<@%s> Recurring Reminder (ID: %d): %s", r.UserID, id, r.Message),
 			Components: []discordgo.MessageComponent{
